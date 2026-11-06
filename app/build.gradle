@@ -4,6 +4,9 @@ plugins {
 }
 
 android {
+    buildFeatures {
+        aidl true
+    }
     namespace "com.tagtusvr.cuddlyterminal"
     compileSdk 35
 
