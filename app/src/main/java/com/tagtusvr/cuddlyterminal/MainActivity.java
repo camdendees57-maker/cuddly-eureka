@@ -159,7 +159,8 @@ public class MainActivity extends Activity {
             if (shellService == null) {
                 serviceArgs = new Shizuku.UserServiceArgs(
                     new ComponentName(this, ShellUserService.class))
-                    .daemon(false).tag("cuddly-eureka-shell").version(1);
+                    .daemon(false).tag("cuddly-eureka-shell")
+                    .processNameSuffix("cuddly_eureka_shell").version(1);
                 Shizuku.bindUserService(serviceArgs, shellConnection);
                 runOnUiThread(() -> setStatus("Authorized — starting shell service…", Color.YELLOW));
             } else {
