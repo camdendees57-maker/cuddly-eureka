@@ -525,11 +525,13 @@ public class MainActivity extends Activity {
             String result;
             try {
                 if (command.equals("help")) {
-                    result = "Commands:\n  id\n  getprop <key>\n  pm list packages -3\n  python <code>\n  pip install <package>\n  pip list\n  Any shell command (requires ByteZuku)";
+                    result = "Commands:\n  id\n  getprop <key>\n  pm list packages -3\n  python <code>\n  pip install <package>\n  pip list\n  install-apktool\n  Any shell command (requires ByteZuku)";
                 } else if (command.startsWith("python ")) {
                     result = runPython(command.substring(7));
                 } else if (command.startsWith("pip ")) {
                     result = runPython("print(pip_command(" + pyQuote(command.substring(4)) + ", app_files))");
+                } else if (command.equals("install-apktool")) {
+                    result = installApktool();
                 } else {
                     result = connected ? runShell(command) : "No authorized shell. Connect ByteZuku first.";
                 }
@@ -633,19 +635,30 @@ public class MainActivity extends Activity {
     }
 
     private String injectLibrary(File lib, File apk) throws Exception {
-        File outApk = new File(getCacheDir(), "injected-" + apk.getName());
+        File outDir = new File(getFilesDir(), "injected");
+        if (!outDir.exists()) outDir.mkdirs();
+        File outApk = new File(outDir, "injected-" + System.currentTimeMillis() + ".apk");
         String libName = lib.getName();
         if (!libName.endsWith(".so")) libName += ".so";
         String abiPath = "lib/arm64-v8a/" + libName;
 
         try (ZipFile zipIn = new ZipFile(apk);
              java.util.zip.ZipOutputStream zipOut = new java.util.zip.ZipOutputStream(new FileOutputStream(outApk))) {
+            zipOut.setLevel(java.util.zip.Deflater.BEST_COMPRESSION);
             java.util.Enumeration<? extends ZipEntry> entries = zipIn.entries();
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[16384];
             while (entries.hasMoreElements()) {
                 ZipEntry e = entries.nextElement();
-                if (e.getName().equals(abiPath)) continue;
-                zipOut.putNextEntry(new ZipEntry(e.getName()));
+                String name = e.getName();
+                if (name.equals(abiPath)) continue;
+                ZipEntry ne = new ZipEntry(name);
+                ne.setTime(e.getTime());
+                ne.setMethod(e.getMethod());
+                if (e.getMethod() == ZipEntry.STORED) {
+                    ne.setSize(e.getSize());
+                    ne.setCrc(e.getCrc());
+                }
+                zipOut.putNextEntry(ne);
                 if (!e.isDirectory()) {
                     try (InputStream is = zipIn.getInputStream(e)) {
                         int n;
@@ -655,6 +668,7 @@ public class MainActivity extends Activity {
                 zipOut.closeEntry();
             }
             ZipEntry libEntry = new ZipEntry(abiPath);
+            libEntry.setTime(System.currentTimeMillis());
             zipOut.putNextEntry(libEntry);
             try (InputStream is = new java.io.FileInputStream(lib)) {
                 int n;
@@ -666,16 +680,47 @@ public class MainActivity extends Activity {
         PackageInfo pkg = getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), PackageManager.GET_ACTIVITIES);
         String mainAct = "unknown";
         if (pkg != null && pkg.activities != null && pkg.activities.length > 0) {
-            mainAct = pkg.activities[0].name;
+            for (android.content.pm.ActivityInfo ai : pkg.activities) {
+                if (ai.name != null) { mainAct = ai.name; break; }
+            }
         }
 
-        return "LIB INJECTED\\n" +
-               "Output: " + outApk.getAbsolutePath() + "\\n" +
-               "Library placed at: " + abiPath + "\\n" +
-               "Detected main activity: " + mainAct + "\\n\\n" +
-               "NOTE: Full smali auto-hook (System.loadLibrary in onCreate) requires apktool decompile/rebuild.\\n" +
-               "The .so is now inside the APK. Use external apktool or Frida to load it, or extend this injector.\\n" +
-               "Original APK was not modified.";
+        StringBuilder sb = new StringBuilder();
+        sb.append("LIB INJECTED\n");
+        sb.append("Output APK: ").append(outApk.getAbsolutePath()).append("\n");
+        sb.append("Size: ").append(outApk.length()).append(" bytes\n");
+        sb.append("Library placed at: ").append(abiPath).append("\n");
+        sb.append("Detected main activity: ").append(mainAct).append("\n\n");
+        sb.append("Pull the APK with adb pull or file manager.\n");
+        sb.append("Full smali load hook still needs apktool (run 'install-apktool' in terminal).\n");
+        sb.append("Original APK was not modified.");
+        return sb.toString();
+    }
+
+    private String installApktool() {
+        try {
+            File tools = new File(getFilesDir(), "tools");
+            if (!tools.exists()) tools.mkdirs();
+            File jar = new File(tools, "apktool.jar");
+            File wrapper = new File(tools, "apktool");
+            String py = "import urllib.request, os\n" +
+                        "url='https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar'\n" +
+                        "path=r'" + jar.getAbsolutePath().replace("\\", "\\\\") + "'\n" +
+                        "urllib.request.urlretrieve(url, path)\n" +
+                        "print('Downloaded', os.path.getsize(path), 'bytes')";
+            String dl = runPython(py);
+            String wrapperContent = "#!/system/bin/sh\n" +
+                                    "exec java -jar " + jar.getAbsolutePath() + " \"$@\"\n";
+            try (FileOutputStream fos = new FileOutputStream(wrapper)) {
+                fos.write(wrapperContent.getBytes());
+            }
+            wrapper.setExecutable(true);
+            return "APKTOOL SETUP\n" + dl + "\nWrapper: " + wrapper.getAbsolutePath() + "\n" +
+                   "Usage (if java available): " + wrapper.getAbsolutePath() + " d app.apk\n" +
+                   "Note: Requires a Java runtime in the shell environment.";
+        } catch (Exception e) {
+            return "APKTOOL INSTALL FAILED: " + e.getMessage();
+        }
     }
 
     @Override protected void onDestroy() {
