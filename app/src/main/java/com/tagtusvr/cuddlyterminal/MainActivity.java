@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
-import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
@@ -12,12 +11,14 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
+import android.os.IBinder;
+import android.content.pm.PackageManager;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -29,23 +30,38 @@ public class MainActivity extends Activity {
     private LinearLayout output;
     private EditText commandInput;
     private TextView status;
-    private boolean connected = false;
+    private volatile boolean connected = false;
+    private IShellService shellService;
+    private Shizuku.UserServiceArgs serviceArgs;
+
+    private final ServiceConnection shellConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            shellService = IShellService.Stub.asInterface(binder);
+            connected = shellService != null;
+            setStatus(connected ? "AUTHORIZED • UID " + Shizuku.getUid()
+                + " • " + Shizuku.getSELinuxContext() : "Shell service unavailable",
+                connected ? Color.rgb(110, 235, 190) : Color.RED);
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            shellService = null;
+            connected = false;
+            setStatus("Privileged shell service disconnected", Color.RED);
+        }
+    };
 
     private final Shizuku.OnRequestPermissionResultListener permissionListener =
         (requestCode, grantResult) -> {
             if (requestCode == REQUEST_CODE) refreshConnection();
         };
-
     private final Shizuku.OnBinderReceivedListener binderListener = this::refreshConnection;
     private final Shizuku.OnBinderDeadListener binderDeadListener = () -> {
         connected = false;
+        shellService = null;
         runOnUiThread(() -> setStatus("ByteZuku/Shizuku service disconnected", Color.RED));
     };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().getDecorView().setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         buildUi();
         if (!Python.isStarted()) Python.start(new AndroidPlatform(this));
         Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -113,7 +129,7 @@ public class MainActivity extends Activity {
                 setStatus("Service not running. Start ByteZuku first.", Color.RED);
                 return;
             }
-            if (Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
                 refreshConnection();
             } else {
                 Shizuku.requestPermission(REQUEST_CODE);
@@ -130,18 +146,27 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> setStatus("ByteZuku not detected — start its service", Color.RED));
                 return;
             }
-            if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
                 connected = false;
                 runOnUiThread(() -> setStatus("Service found — authorization required", Color.YELLOW));
                 return;
             }
-            connected = true;
-            worker.execute(() -> {
-                String identity = runShell("id");
-                String context = runShell("cat /proc/self/attr/current");
-                runOnUiThread(() -> setStatus("AUTHORIZED • " + identity.trim() + " • " + context.trim(),
-                    Color.rgb(110, 235, 190)));
-            });
+            if (Shizuku.isPreV11()) {
+                connected = false;
+                runOnUiThread(() -> setStatus("Unsupported service version. Update ByteZuku.", Color.RED));
+                return;
+            }
+            if (shellService == null) {
+                serviceArgs = new Shizuku.UserServiceArgs(
+                    new ComponentName(this, ShellUserService.class))
+                    .daemon(false).tag("cuddly-eureka-shell").version(1);
+                Shizuku.bindUserService(serviceArgs, shellConnection);
+                runOnUiThread(() -> setStatus("Authorized — starting shell service…", Color.YELLOW));
+            } else {
+                connected = true;
+                runOnUiThread(() -> setStatus("AUTHORIZED • UID " + Shizuku.getUid()
+                    + " • " + Shizuku.getSELinuxContext(), Color.rgb(110, 235, 190)));
+            }
         } catch (Throwable t) {
             connected = false;
             runOnUiThread(() -> setStatus("Connection check failed: " + t.getMessage(), Color.RED));
@@ -154,29 +179,25 @@ public class MainActivity extends Activity {
             String result;
             try {
                 if (command.equals("help")) {
-                    result = "Shell: any command supported by the authorized Android shell\n"
+                    result = "Shell: commands supported by the authorized Android shell\n"
                         + "Python: python <code>\nPip: pip install <package> | pip list\n"
                         + "Built-ins: help, clear, connect, whoami\n"
-                        + "Note: adb host commands (adb devices) are not implemented.\n";
+                        + "adb devices/USB host control are not included.\n";
                 } else if (command.equals("clear")) {
                     runOnUiThread(() -> output.removeAllViews());
                     return;
                 } else if (command.equals("connect")) {
-                    requestShellPermission();
+                    runOnUiThread(this::requestShellPermission);
                     return;
                 } else if (command.equals("whoami")) {
                     result = connected ? runShell("id") : "Not authorized. Tap CONNECT first.";
                 } else if (command.startsWith("python ")) {
                     result = runPython(command.substring(7));
                 } else if (command.startsWith("pip ")) {
-                    result = runPython("pip_command(" + pyQuote(command.substring(4)) + ")");
+                    result = runPython("print(pip_command(" + pyQuote(command.substring(4)) + ", app_files))");
                 } else {
-                    if (!connected || !Shizuku.pingBinder()
-                        || Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                        result = "No authorized shell. Start ByteZuku and tap CONNECT.";
-                    } else {
-                        result = runShell(command);
-                    }
+                    result = connected ? runShell(command)
+                        : "No authorized shell. Start ByteZuku and tap CONNECT.";
                 }
             } catch (Throwable t) {
                 result = "ERROR: " + t.getClass().getSimpleName() + ": " + t.getMessage();
@@ -187,26 +208,14 @@ public class MainActivity extends Activity {
     }
 
     private String runPython(String code) {
-        return Python.getInstance().getModule("terminal").callAttr("run", code, getFilesDir().getAbsolutePath()).toString();
+        return Python.getInstance().getModule("terminal")
+            .callAttr("run", code, getFilesDir().getAbsolutePath()).toString();
     }
 
     private String runShell(String command) {
         try {
-            if (!Shizuku.pingBinder()
-                || Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                return "Permission not granted.";
-            }
-            Process process = Shizuku.newProcess(new String[]{"sh", "-c", command}, null, null);
-            StringBuilder out = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-                 BufferedReader errors = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) out.append(line).append('\n');
-                while ((line = errors.readLine()) != null) out.append(line).append('\n');
-            }
-            int code = process.waitFor();
-            if (code != 0) out.append("[exit ").append(code).append("]\n");
-            return out.toString();
+            if (!connected || shellService == null) return "No authorized shell service.";
+            return shellService.exec(command);
         } catch (Throwable t) {
             return "Shell error: " + t.getMessage();
         }
@@ -227,14 +236,20 @@ public class MainActivity extends Activity {
     }
 
     private void setStatus(String value, int color) {
-        status.setText(value);
-        status.setTextColor(color);
+        runOnUiThread(() -> {
+            status.setText(value);
+            status.setTextColor(color);
+        });
     }
 
     @Override protected void onDestroy() {
         Shizuku.removeRequestPermissionResultListener(permissionListener);
         Shizuku.removeBinderReceivedListener(binderListener);
         Shizuku.removeBinderDeadListener(binderDeadListener);
+        if (serviceArgs != null) {
+            try { Shizuku.unbindUserService(serviceArgs, shellConnection, true); }
+            catch (Throwable ignored) { }
+        }
         worker.shutdownNow();
         super.onDestroy();
     }
