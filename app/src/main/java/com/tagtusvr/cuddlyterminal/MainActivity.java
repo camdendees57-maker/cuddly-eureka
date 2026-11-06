@@ -201,10 +201,13 @@ public class MainActivity extends Activity {
                     setStatus("UserService bind failed: " + bindError.getClass().getSimpleName()
                         + ": " + bindError.getMessage(), Color.RED);
                 }
-            } else {
+            } else if (shellService != null) {
                 connected = true;
                 runOnUiThread(() -> setStatus("AUTHORIZED • UID " + Shizuku.getUid()
                     + " • " + Shizuku.getSELinuxContext(), Color.rgb(110, 235, 190)));
+            } else if (binding) {
+                connected = false;
+                runOnUiThread(() -> setStatus("Waiting for shell Binder…", Color.YELLOW));
             }
         } catch (Throwable t) {
             connected = false;
