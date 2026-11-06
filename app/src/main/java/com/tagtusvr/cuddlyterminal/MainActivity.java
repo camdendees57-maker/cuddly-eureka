@@ -14,6 +14,8 @@ import android.widget.TextView;
 import android.content.ComponentName;
 import android.content.ServiceConnection;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
 import android.content.pm.PackageManager;
 
 import com.chaquo.python.Python;
@@ -33,9 +35,20 @@ public class MainActivity extends Activity {
     private volatile boolean connected = false;
     private IShellService shellService;
     private Shizuku.UserServiceArgs serviceArgs;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean binding = false;
+    private static final long BIND_TIMEOUT_MS = 15000L;
+    private final Runnable bindTimeout = () -> {
+        if (!connected && binding) {
+            binding = false;
+            setStatus("Bind timed out after 15s. ByteZuku authorized the app, but did not return the shell Binder. Check ByteZuku compatibility/logs, then tap CONNECT to retry.", Color.RED);
+        }
+    };
 
     private final ServiceConnection shellConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            mainHandler.removeCallbacks(bindTimeout);
+            binding = false;
             shellService = IShellService.Stub.asInterface(binder);
             connected = shellService != null;
             setStatus(connected ? "AUTHORIZED • UID " + Shizuku.getUid()
@@ -43,9 +56,25 @@ public class MainActivity extends Activity {
                 connected ? Color.rgb(110, 235, 190) : Color.RED);
         }
         @Override public void onServiceDisconnected(ComponentName name) {
+            mainHandler.removeCallbacks(bindTimeout);
+            binding = false;
             shellService = null;
             connected = false;
             setStatus("Privileged shell service disconnected", Color.RED);
+        }
+        @Override public void onBindingDied(ComponentName name) {
+            mainHandler.removeCallbacks(bindTimeout);
+            binding = false;
+            shellService = null;
+            connected = false;
+            setStatus("Shell binding died. ByteZuku stopped the UserService process.", Color.RED);
+        }
+        @Override public void onNullBinding(ComponentName name) {
+            mainHandler.removeCallbacks(bindTimeout);
+            binding = false;
+            shellService = null;
+            connected = false;
+            setStatus("ByteZuku returned an empty service Binder. UserService launch is incompatible or failed.", Color.RED);
         }
     };
 
@@ -156,13 +185,22 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> setStatus("Unsupported service version. Update ByteZuku.", Color.RED));
                 return;
             }
-            if (shellService == null) {
+            if (shellService == null && !binding) {
+                binding = true;
                 serviceArgs = new Shizuku.UserServiceArgs(
                     new ComponentName(this, ShellUserService.class))
                     .daemon(false).tag("cuddly-eureka-shell")
-                    .processNameSuffix("cuddly_eureka_shell").version(1);
-                Shizuku.bindUserService(serviceArgs, shellConnection);
-                runOnUiThread(() -> setStatus("Authorized — starting shell service…", Color.YELLOW));
+                                    .processNameSuffix("cuddly_eureka_shell").debuggable(true).version(2);
+                setStatus("Authorized — requesting shell Binder…", Color.YELLOW);
+                try {
+                    Shizuku.bindUserService(serviceArgs, shellConnection);
+                    mainHandler.removeCallbacks(bindTimeout);
+                    mainHandler.postDelayed(bindTimeout, BIND_TIMEOUT_MS);
+                } catch (Throwable bindError) {
+                    binding = false;
+                    setStatus("UserService bind failed: " + bindError.getClass().getSimpleName()
+                        + ": " + bindError.getMessage(), Color.RED);
+                }
             } else {
                 connected = true;
                 runOnUiThread(() -> setStatus("AUTHORIZED • UID " + Shizuku.getUid()
@@ -247,6 +285,8 @@ public class MainActivity extends Activity {
         Shizuku.removeRequestPermissionResultListener(permissionListener);
         Shizuku.removeBinderReceivedListener(binderListener);
         Shizuku.removeBinderDeadListener(binderDeadListener);
+        mainHandler.removeCallbacks(bindTimeout);
+        binding = false;
         if (serviceArgs != null) {
             try { Shizuku.unbindUserService(serviceArgs, shellConnection, true); }
             catch (Throwable ignored) { }
