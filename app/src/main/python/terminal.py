@@ -17,7 +17,7 @@ def run(code, app_files):
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            exec(code, {"__name__": "__main__"})
+            exec(code, {"__name__": "__main__", "pip_command": pip_command, "app_files": app_files})
     except BaseException:
         traceback.print_exc(file=buf)
     return buf.getvalue()
