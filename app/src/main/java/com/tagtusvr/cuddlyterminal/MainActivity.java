@@ -737,8 +737,11 @@ public class MainActivity extends Activity {
             if (javaBin == null) javaBin = new File(jreDir, "bin/java");
 
             String javaPath = javaBin.exists() ? javaBin.getAbsolutePath() : "java";
+            String libPath = (javaBin.getParentFile() != null && javaBin.getParentFile().getParent() != null)
+                ? javaBin.getParentFile().getParent() + "/lib"
+                : "";
             String wrapperContent = "#!/system/bin/sh\n" +
-                                    "export LD_LIBRARY_PATH=" + (javaBin.getParentFile() != null ? javaBin.getParentFile().getParent() : "") + "/lib:\$LD_LIBRARY_PATH\n" +
+                                    "export LD_LIBRARY_PATH=" + libPath + ":$LD_LIBRARY_PATH\n" +
                                     "exec " + javaPath + " -Xmx512m -jar " + jar.getAbsolutePath() + " \"$@\"\n";
             try (FileOutputStream fos = new FileOutputStream(wrapper)) {
                 fos.write(wrapperContent.getBytes());
